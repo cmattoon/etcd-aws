@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/coreos/go-etcd/etcd"
+	"github.com/coreos/etcd/clientv3"
 	"github.com/crewjam/awsregion"
 	"github.com/crewjam/ec2cluster"
 )
@@ -191,14 +192,33 @@ func main() {
 			log.Printf("%s: %s", filepath.Join(*dataDir, "member"), err)
 		}
 	}
+
+	etcdClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   []string{fmt.Sprintf("http://%s:2379", *localInstance.PrivateIpAddress)},
+		DialTimeout: 5 * time.Second,
+	})
+
+	if err != nil {
+		log.Fatalf("ERROR: Could not get etcdClient: %s", err)
+	}
+
+	defer etcdClient.Close()
+
 	go func() {
 		// wait for etcd to start
 		for {
-			etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379",
-				*localInstance.PrivateIpAddress)})
-			if success := etcdClient.SyncCluster(); success {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Attempt to sync
+			err = etcdClient.Sync(ctx)
+			cancel()
+
+			if err != nil {
+				log.Fatalf("ERROR: Failed to Sync: %s", err)
+			} else {
+				log.Info("Cluster synced successfully")
 				break
 			}
+
 			time.Sleep(time.Second)
 		}
 
@@ -215,7 +235,7 @@ func main() {
 
 	// watch for lifecycle events and remove nodes from the cluster as they are
 	// terminated.
-	go watchLifecycleEvents(s, localInstance)
+	go watchLifecycleEvents(s, localInstance, *etcdClient)
 
 	// Run the etcd command
 	cmd := exec.Command("etcd")

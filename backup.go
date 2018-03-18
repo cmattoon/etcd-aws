@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/coreos/go-etcd/etcd"
+	"github.com/coreos/etcd/clientv3"
 	"github.com/crewjam/ec2cluster"
 )
 
@@ -72,38 +73,50 @@ func getInstanceTag(instance *ec2.Instance, tagName string) string {
 
 // dumpEtcdNode writes a JSON representation of the nodes and and below `key`
 // to `w`. Returns the number of nodes traversed.
-func dumpEtcdNode(key string, etcdClient *etcd.Client, w io.Writer) (int, error) {
-	response, err := etcdClient.Get(key, false, false)
+func dumpEtcdNode(key string, etcdClient *clientv3.Client, w io.Writer) (int, error) {
+	log.Info("dumpEtcdNode not implemented")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	response, err := etcdClient.Get(ctx, key)
+	cancel()
+
 	if err != nil {
+		log.Fatalf("ERROR: Failed to get key '%s': %s", key, err)
 		return 0, err
 	}
 
-	childNodes := response.Node.Nodes
-	response.Node.Nodes = nil
-	if err := json.NewEncoder(w).Encode(response.Node); err != nil {
-		return 0, err
-	}
-	count := 1
-
-	// enumerate all the child nodes. If a child node is
-	// a directory, then it must be backed up recursively.
-	// Otherwise it can just be written
-	for _, childNode := range childNodes {
-		if childNode.Dir {
-			c, err := dumpEtcdNode(childNode.Key, etcdClient, w)
-			if err != nil {
-				return 0, err
-			}
-			count += c
-		} else {
-			if err := json.NewEncoder(w).Encode(childNode); err != nil {
-				return 0, err
-			}
-			count += 1
-		}
+	for _, ev := range response.Kvs {
+		log.Infof("'%s': '%s'", ev.Key, ev.Value)
+		return 0, nil
 	}
 
-	return count, nil
+	// childNodes := response.Node.Nodes
+	// response.Node.Nodes = nil
+	// if err := json.NewEncoder(w).Encode(response.Node); err != nil {
+	// 	return 0, err
+	// }
+	// count := 1
+
+	// // enumerate all the child nodes. If a child node is
+	// // a directory, then it must be backed up recursively.
+	// // Otherwise it can just be written
+	// for _, childNode := range childNodes {
+	// 	if childNode.Dir {
+	// 		c, err := dumpEtcdNode(childNode.Key, etcdClient, w)
+	// 		if err != nil {
+	// 			return 0, err
+	// 		}
+	// 		count += c
+	// 	} else {
+	// 		if err := json.NewEncoder(w).Encode(childNode); err != nil {
+	// 			return 0, err
+	// 		}
+	// 		count += 1
+	// 	}
+	// }
+
+	// return count, nil
+	return 0, nil
 }
 
 // backupOnce dumps all the nodes in the etcd cluster to the specified S3 bucket. On
@@ -114,9 +127,26 @@ func backupOnce(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string) 
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)})
-	if success := etcdClient.SyncCluster(); !success {
-		return fmt.Errorf("backupOnce: cannot sync machines")
+
+	// Create etcdClient
+	etcdClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   []string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)},
+		DialTimeout: 5 * time.Second,
+	})
+
+	if err != nil {
+		log.Fatalf("ERROR: Could not get etcdClient: %s", err)
+	}
+
+	defer etcdClient.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	err = etcdClient.Sync(ctx)
+	cancel()
+
+	if err != nil {
+		log.Fatalf("ERROR: Failed to sync cluster: %s", err)
 	}
 
 	var valueCount int
@@ -173,43 +203,46 @@ func backupOnce(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir string) 
 
 // loadEtcdNode reads `r` containing JSON objects representing etcd nodes and
 // loads them into server.
-func loadEtcdNode(etcdClient *etcd.Client, r io.Reader) error {
-	jsonReader := json.NewDecoder(r)
-	for {
-		node := etcd.Node{}
-		if err := jsonReader.Decode(&node); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-		if node.Key == "" && node.Dir {
-			continue // skip root
-		}
-
-		// compute a new TTL
-		ttl := 0
-		if node.Expiration != nil {
-			ttl := node.Expiration.Sub(time.Now()).Seconds()
-			if ttl < 0 {
-				// expired, skip
-				continue
-			}
-		}
-
-		if node.Dir {
-			_, err := etcdClient.SetDir(node.Key, uint64(ttl))
-			if err != nil {
-				return fmt.Errorf("%s: %s", node.Key, err)
-			}
-		} else {
-			_, err := etcdClient.Set(node.Key, node.Value, uint64(ttl))
-			if err != nil {
-				return fmt.Errorf("%s: %s", node.Key, err)
-			}
-		}
-	}
+func loadEtcdNode(etcdClient *clientv3.Client, r io.Reader) error {
+	log.Info("loadEtcdNode not implemented")
 	return nil
+
+	// jsonReader := json.NewDecoder(r)
+	// for {
+	// 	node := etcd.Node{}
+	// 	if err := jsonReader.Decode(&node); err != nil {
+	// 		if err == io.EOF {
+	// 			break
+	// 		}
+	// 		return err
+	// 	}
+	// 	if node.Key == "" && node.Dir {
+	// 		continue // skip root
+	// 	}
+
+	// 	// compute a new TTL
+	// 	ttl := 0
+	// 	if node.Expiration != nil {
+	// 		ttl := node.Expiration.Sub(time.Now()).Seconds()
+	// 		if ttl < 0 {
+	// 			// expired, skip
+	// 			continue
+	// 		}
+	// 	}
+
+	// 	if node.Dir {
+	// 		_, err := etcdClient.SetDir(node.Key, uint64(ttl))
+	// 		if err != nil {
+	// 			return fmt.Errorf("%s: %s", node.Key, err)
+	// 		}
+	// 	} else {
+	// 		_, err := etcdClient.Set(node.Key, node.Value, uint64(ttl))
+	// 		if err != nil {
+	// 			return fmt.Errorf("%s: %s", node.Key, err)
+	// 		}
+	// 	}
+	// }
+	// return nil
 }
 
 // restoreBackup reads the backup from S3 and applies it to the current cluster.
@@ -218,9 +251,22 @@ func restoreBackup(s *ec2cluster.Cluster, backupBucket, backupKey, dataDir strin
 	if err != nil {
 		return err
 	}
-	etcdClient := etcd.NewClient([]string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)})
-	if success := etcdClient.SyncCluster(); !success {
-		return fmt.Errorf("restore: cannot sync machines")
+	etcdClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   []string{fmt.Sprintf("http://%s:2379", *instance.PrivateIpAddress)},
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("ERROR: Could not get etcdClient: %s", err)
+	}
+
+	defer etcdClient.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = etcdClient.Sync(ctx)
+	cancel()
+
+	if err != nil {
+		log.Fatalf("ERROR: Failed to Sync: %s", err)
 	}
 
 	s3svc := s3.New(s.AwsSession)
